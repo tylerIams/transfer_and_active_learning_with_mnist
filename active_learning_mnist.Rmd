@@ -1,0 +1,422 @@
+---
+title: "Active Learning Practice"
+author: "Tyler Iams"
+date: "2/7/2019"
+output: html_document
+params:
+  seed: 101  
+---
+
+#Overview
+
+The goal of this project is to deploy the technique of active learning on a variety of datasets with one script.  I will therefore need to make the technique flexible
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, cache=FALSE, message=FALSE, warning=FALSE, fig.height=7.5)
+```
+
+```{r load_libraries_and_data}
+library(ggplot2)
+library(tidyverse)
+library(keras)
+library(pROC)
+library(glmnet)
+library(feather)
+library(reshape2)
+```
+
+# Data Gathering and Tidying
+
+First Grab the mnist data
+
+```{r, warning=FALSE}
+# Read in the data
+mnist <- dataset_mnist()
+```
+
+# Need to do some reshaping of their data
+
+To achieve what we want to with active learning, we first train a model on nums 0-4, then use that model to featurize the nums 5-9.  First we separate out the 0-4 and 5-9 into two datasets. 
+
+```{r}
+train <- mnist$train
+test <- mnist$test
+
+train_set <- data.frame(x = train$x, y = train$y)
+test_set <- data.frame(x = test$x, y = test$y)
+```
+
+Count how many 0-4 digits there are in each dataset
+
+```{r}
+train_set %>% count(y < 5) 
+test_set %>% count(y < 5)
+```
+
+There are 30596 digits that are less than 5 in the train_set and 5139 digits less than 5 in the test_set
+
+Separate the train_set into two groups (first lets create dataframes via matrices to allocate memory and avoid using rbind).
+
+```{r eval=FALSE}
+mat0 <- matrix(nrow = 30596, ncol = 785)
+mat01 <- matrix(nrow = 60000, ncol = 785)
+
+zeroToFour <- data.frame(mat0)
+fiveToNine <- data.frame(mat01)
+count <- 0
+realCount <- 0
+
+for (x in 1:60000) {
+  if (train_set[x,785] > 4) {
+      fiveToNine[x,] <- train_set[x,]
+      count = count + 1
+      realCount = realCount + 1
+      if (count == 100) {
+        print(train_set[x,785])
+        print(realCount)
+        count = 0
+      }
+  }
+}
+
+fiveToNine <- fiveToNine %>% na.omit()
+```
+
+Separate the test_set into two groups the same way and then we'll combine the two data frame groups.
+
+```{r eval=FALSE}
+mat02 <- matrix(nrow = 5139, ncol = 785)
+mat03 <- matrix(nrow = 4861, ncol = 785)
+
+df2 <- data.frame(mat)
+df02 <- data.frame(mat01)
+
+for (x in 1:10000) {
+  if (test_set[x,785] < 5) {
+    df2[x,] <- test_set[x,]
+  } else {
+    df02[x,] <- test_set[x,]
+  }
+}
+
+df2 <- df2 %>% na.omit()
+df02 <- df02 %>% na.omit()
+
+colnames(zeroToFour) <- colnames(df2)
+
+colnames(fiveToNine) <- colnames(df02)
+
+zeroToFour <- rbind(zeroToFour, df2)
+
+fiveToNine <- rbind(fiveToNine, df02)
+
+# clean up the mess
+rm(df02)
+rm(df2)
+rm(mat0)
+rm(mat01)
+rm(mat02)
+rm(mat03)
+
+# now write them to file so we don't have to do this again
+write_csv(zeroToFour, "zero_to_four.csv")
+write_csv(fiveToNine, "five_to_nine.csv")
+```
+
+
+*******
+## Start Here if you've written to file already
+*******
+
+
+```{r}
+zeroToFour <- read_csv("zero_to_four.csv")
+fiveToNine <- read_csv("five_to_nine.csv")
+```
+
+
+Next we need to separate into test and training sets
+
+```{r}
+nrow(zeroToFour)
+
+test_set_04 <- zeroToFour %>% sample_frac(.1)
+train_set_04 <- zeroToFour %>% setdiff(test_set_04)
+test_set_59 <- fiveToNine %>% sample_frac(.1)
+train_set_59 <- fiveToNine %>% setdiff(test_set_59)
+```
+
+# We are only going to train a model on 0-4 at first, then we will extract the features and train a ridge regression model on those to see how it performs
+
+```{r}
+# Put these into matrices
+train_set_04_targets <- train_set_04[,785]
+train_set_04_targets <- train_set_04_targets %>% mutate(X785 = factor(X785))
+train_set_04_targets <- model.matrix(~ ., data = train_set_04_targets)
+train_set_04_targets <- train_set_04_targets[,-1]
+zeros <- ifelse(train_set_04_targets[,1] + train_set_04_targets[,2] + train_set_04_targets[,3] + train_set_04_targets[,4] == 0, 1, 0)
+train_set_04_targets <- cbind(zeros, train_set_04_targets)
+
+train_set_04 <- model.matrix(~ ., data = select(train_set_04, -X785))
+train_set_04 <- train_set_04[,-1]
+train_set_04 <- array_reshape(train_set_04, c(32161, 28 * 28))
+train_set_04 <- train_set_04/255
+```
+
+```{r}
+test_set_04_targets <- test_set_04[,785]
+test_set_04_targets <- test_set_04_targets %>% mutate(X785 = factor(X785))
+test_set_04_targets <- model.matrix(~ ., test_set_04_targets)
+test_set_04_targets <- test_set_04_targets[,-1]
+zeros <- ifelse(test_set_04_targets[,1] + test_set_04_targets[,2] + test_set_04_targets[,3] + test_set_04_targets[,4] == 0, 1, 0)
+test_set_04_targets <- cbind(zeros, test_set_04_targets)
+
+test_set_04 <- model.matrix(~ ., data = select(test_set_04, -X785))
+test_set_04 <- test_set_04[,-1]
+test_set_04 <- array_reshape(test_set_04, c(3574, 28 * 28))
+test_set_04 <- test_set_04/255
+```
+
+```{r}
+# Put these into matrices
+train_set_59_targets <- train_set_59[,785]
+train_set_59_targets <- train_set_59_targets %>% mutate(X785 = factor(X785))
+train_set_59_targets <- model.matrix(~ ., data = train_set_59_targets)
+train_set_59_targets <- train_set_59_targets[,-1]
+zeros <- ifelse(train_set_59_targets[,1] + train_set_59_targets[,2] + train_set_59_targets[,3] + train_set_59_targets[,4] == 0, 1, 0)
+train_set_59_targets <- cbind(zeros, train_set_59_targets)
+
+train_set_59 <- model.matrix(~ ., data = select(train_set_59, -X785))
+train_set_59 <- train_set_59[,-1]
+train_set_59 <- array_reshape(train_set_59, c(30839, 28 * 28))
+train_set_59 <- train_set_59/255
+```
+
+```{r}
+test_set_59_targets <- test_set_59[,785]
+test_set_59_targets <- test_set_59_targets %>% mutate(X785 = factor(X785))
+test_set_59_targets <- model.matrix(~ ., test_set_59_targets)
+test_set_59_targets <- test_set_59_targets[,-1]
+zeros <- ifelse(test_set_59_targets[,1] + test_set_59_targets[,2] + test_set_59_targets[,3] + test_set_59_targets[,4] == 0, 1, 0)
+test_set_59_targets <- cbind(zeros, test_set_59_targets)
+
+test_set_59 <- model.matrix(~ ., data = select(test_set_59, -X785))
+test_set_59 <- test_set_59[,-1]
+test_set_59 <- array_reshape(test_set_59, c(3426, 28 * 28))
+test_set_59 <- test_set_59/255
+```
+
+# Network Architecture
+
+```{r}
+# create the neural network
+
+network <- keras_model_sequential() %>%
+  layer_dense(units = 512, activation = "relu", input_shape = c(28 * 28)) %>%
+  layer_dense(units = 5, activation = "softmax")
+
+network %>% compile(
+  optimizer = "rmsprop",
+  loss = "categorical_crossentropy",
+  metrics = c("accuracy")
+)
+
+network %>% fit(train_set_04, train_set_04_targets, epochs = 8, batch_size = 128)
+
+```
+
+
+```{r}
+#network is over 99% accurate on test data
+
+metrics <- network %>% evaluate(test_set_04, test_set_04_targets)
+metrics$acc
+```
+
+# Grab The Correct Layer And Featurize the training set 5-9
+
+```{r}
+network
+
+layer_name <- 'dense_1'
+
+intermediate_layer_model <- keras_model(inputs = network$input, outputs = get_layer(network, layer_name)$output)
+
+intermediate_output <- predict(intermediate_layer_model, train_set_59)
+
+test_intermediate_output <- predict(intermediate_layer_model, test_set_59)
+```
+
+# Write these to file (don't forget to add the output column first though)
+
+```{r eval = FALSE}
+targets_59train <- ifelse(train_set_59_targets[,1] == 1, 5,
+                          ifelse(train_set_59_targets[,2] == 1, 6,
+                                 ifelse(train_set_59_targets[,3] == 1, 7, 
+                                        ifelse(train_set_59_targets[,4] == 1, 8, 9))))
+
+targets_59test <- ifelse(test_set_59_targets[,1] == 1, 5,
+                          ifelse(test_set_59_targets[,2] == 1, 6,
+                                 ifelse(test_set_59_targets[,3] == 1, 7, 
+                                        ifelse(test_set_59_targets[,4] == 1, 8, 9))))
+
+
+intermediate_output <- cbind(intermediate_output, targets_59train)
+test_intermediate_output <- cbind(test_intermediate_output, targets_59test)
+
+write_csv(as.data.frame(intermediate_output), "train_set_59.csv")
+write_csv(as.data.frame(test_intermediate_output), "test_set_59.csv")
+```
+
+
+******
+#Start Here to For Active Learning Only (after featurization)
+******
+
+# Apply Active Learning Techniques
+
+What I will do:
+
+1.  Create a ridge regression model with a percentage of the data (200 featurized images at first, then      n+100 later).
+2.  Use the model to predict on the rest of the dataset
+3.  Log overall accuracy. 
+4.  Get uncertainty of each individual prediction, grab the 100 most uncertain.
+5.  Retrain the model on the now n+100 datapoints.
+6.  Repeat Steps 1-5.
+
+```{r}
+train_set_59 <- read_csv("train_set_59.csv")
+test_set_59 <- read_csv("test_set_59.csv")
+```
+
+Here are several functions:
+1. create_model_active and create_model_random create ridge regression models with the data, they store the model in a global variable.
+2. generate_preds_active and generate_preds_random make predictions based on their corresponding generated model, they both log the results, and then only the generate_preds_active model calls a function to select the next 100 data points to add to the labeled data.
+3.  store_performance and store_performance_rand_set both log the performance of their respective models in their respective data frames.
+4.  select_data selects the next 100 data points to be labeled based on the "confidence" of the model's prediction of their class.
+
+```{r}
+# Items that need to be set up
+active_accuracy_table <- data.frame(round = NA, acc = NA)
+random_accuracy_table <- data.frame(round = NA, acc = NA)
+confusion_matrices <- vector(mode = "list", length = 1000)
+active_round <- 0
+random_round <- 0
+
+# Function for creating a model with data on active learning set
+create_model_active <- function(df) {
+  df <- df %>% mutate(targets_59train = factor(targets_59train))
+  alpha <- 0.0
+  lambda <- 0.5
+  x_train <- model.matrix(~ ., select(df, -targets_59train))
+  y_train <- df$targets_59train
+  active_model <<- glmnet(x_train, y_train, alpha=alpha, 
+                      lambda=lambda, 
+                      family="multinomial")
+}
+
+# Function for creating a model with data on random set
+create_model_random <- function(df) {
+  df <- df %>% mutate(targets_59train = factor(targets_59train))
+  alpha <- 0.0
+  lambda <- 0.5
+  x_train <- model.matrix(~ ., select(df, -targets_59train))
+  y_train <- df$targets_59train
+  random_model <<- glmnet(x_train, y_train, alpha=alpha, 
+                      lambda=lambda, 
+                      family="multinomial")
+}
+
+# Function for generating predictions on active learning set
+generate_preds_active <- function(model, df) {
+   x_test <- model.matrix(~ ., select(df, -targets_59train))
+   category_prob <- predict(active_model, newx=x_test, type="response")
+   preds <- predict(active_model, newx = x_test, type="class")
+   max_probs <- apply(category_prob, 1, FUN = max)
+   df <- cbind(df, max_probs)
+   store_performance(df, preds)
+   df <- df %>% arrange(max_probs)
+   select_data(df)
+}
+
+# Function for generating predictions on random set
+generate_preds_random <- function(model, df) {
+   x_test <- model.matrix(~ ., select(df, -targets_59train))
+   category_prob <- predict(random_model, newx=x_test, type="response")
+   preds <- predict(random_model, newx = x_test, type="class")
+   max_probs <- apply(category_prob, 1, FUN = max)
+   df <- cbind(df, max_probs)
+   store_performance_rand_set(df, preds)
+   df <- df %>% arrange(max_probs)
+}
+
+# Function for logging accuracy of active learning set
+store_performance <- function(df, preds) {
+   active_round <- active_round + 1
+   conf_mat <- table(df$targets_59train, preds)
+   #confusion_matrices[[round]] <- conf_mat
+   acc <- sum(conf_mat[1,1], conf_mat[2,2], conf_mat[3,3], conf_mat[4,4], conf_mat[5,5])/sum(conf_mat)
+   temp <- data.frame(round = active_round, acc = acc)
+   active_accuracy_table <<- rbind(active_accuracy_table, temp)
+}
+
+# Function for logging accuracy of random set
+
+store_performance_rand_set <- function(df, preds) {
+   random_round <- random_round + 1
+   conf_mat <- table(df$targets_59train, preds)
+   #confusion_matrices[[round]] <- conf_mat
+   acc <- sum(conf_mat[1,1], conf_mat[2,2], conf_mat[3,3], conf_mat[4,4], conf_mat[5,5])/sum(conf_mat)
+   temp <- data.frame(round = random_round, acc = acc)
+   random_accuracy_table <<- rbind(random_accuracy_table, temp)
+}
+
+# Function for selecting data and changing datasets
+
+select_data <- function(df) {
+   df <- df %>% select(-max_probs)
+   dat <<- rbind(dat, df[1:100,])
+   remaining_dat <<- remaining_dat %>% setdiff(dat)
+}
+```
+
+Finally we execute the active learning cycle 150 times.
+
+```{r}
+# Start off with 200
+dat <- train_set_59 %>% sample_n(200)
+remaining_dat <- train_set_59 %>% setdiff(dat)
+
+z <- 0
+# And then loop through the rest
+for (x in 1:150) {
+  # Active Data 
+  create_model_active(dat)
+  generate_preds_active(active_model, remaining_dat)
+  # Random Data
+  sample_size <- length(dat$V1)
+  random_dat <- train_set_59 %>% sample_n(sample_size)
+  random_remaining_dat <- train_set_59 %>% setdiff(random_dat)
+  create_model_random(random_dat)
+  generate_preds_random(random_model, random_remaining_dat)
+  print("round complete")
+  z <- z+1
+  print(z)
+}
+```
+
+And here we display the results (sorry for the poorly formatted line graph)
+
+```{r}
+colnames(active_accuracy_table) <- c("round_act", "active_acc") 
+colnames(random_accuracy_table) <- c("round_rand", "random_acc")
+
+ttl_acc <- cbind(active_accuracy_table, random_accuracy_table) %>% na.omit() 
+ttl_acc <- ttl_acc %>% select(-round_act)
+ttl_acc <- ttl_acc %>% select(-round_rand)
+round <- c(1:150)
+ttl_acc <- cbind(round, ttl_acc)
+
+ttl_acc_long <- melt(ttl_acc, id = "round")
+ggplot(data = ttl_acc_long, aes(x=round, y=value, color = variable)) + geom_line()
+```

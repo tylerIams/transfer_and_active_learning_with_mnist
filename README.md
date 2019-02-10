@@ -2,7 +2,7 @@
 This repository uses the Keras package's MNIST dataset to practice transfer and active learning.
 To perform transfer learning I performed the following steps:
   - Separated the images of digits 0-4 and 5-9 into two groups
-  - Createe a two layer neural net classification model on digits 0-4 to over 99% accuracy on a test set.
+  - Created a two layer neural net classification model on digits 0-4 to over 99% accuracy on a test set.
   - Used this model's intermediate layer output to featurize each of the images in the 5-9 group.
   - Exported this data for Active Learning.
 

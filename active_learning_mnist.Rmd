@@ -3,13 +3,11 @@ title: "Active Learning Practice"
 author: "Tyler Iams"
 date: "2/7/2019"
 output: html_document
-params:
-  seed: 101  
 ---
 
 #Overview
 
-The goal of this project is to deploy the technique of active learning on a variety of datasets with one script.  I will therefore need to make the technique flexible
+The goal of this project is to deploy the technique of active learning and transfer learning on the MNIST dataset
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo=TRUE, cache=FALSE, message=FALSE, warning=FALSE, fig.height=7.5)
@@ -19,9 +17,7 @@ knitr::opts_chunk$set(echo=TRUE, cache=FALSE, message=FALSE, warning=FALSE, fig.
 library(ggplot2)
 library(tidyverse)
 library(keras)
-library(pROC)
 library(glmnet)
-library(feather)
 library(reshape2)
 ```
 

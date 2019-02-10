@@ -13,4 +13,4 @@ To perform active learning I performed the following steps:
   - I retrained my model with the larger "labeled" set, and repeated the prediction/probability based selection/retraining steps 150 times.
   - I simultaneously trained a separate ridge regression model with a random sample of 5-9 images of the same size as my labeled set at each iteration, for a control.
   
-Finally, I have created a single plot that reprsents the accuracy of each model at predicting each featurized images class with one group using active learning, and the other group using "passive" or "random" learning.  It can be seen that the active learning group performs markedly better. 
+Finally, I have created a single plot that reprsents the accuracy of each model at predicting each featurized image's class with one group using active learning, and the other group using "passive" or "random" learning.  It can be seen that the active learning group performs markedly better. 
